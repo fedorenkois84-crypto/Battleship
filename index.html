@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Морський бій" />
+
+  <title>Морський бій</title>
+
+  <style>
+    :root { --cell: 28px; --gap: 2px; }
+    body { font-family: -apple-system,system-ui,Segoe UI,Roboto,Arial; margin: 0; padding: 14px; background:#0b1220; color:#e8eefc; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    .panel { background:#121b2f; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:10px; }
+    .top { display:flex; gap:10px; align-items:center; justify-content:space-between; margin-bottom:8px; }
+    button { appearance:none; border:1px solid rgba(255,255,255,.14); background:#182546; color:#e8eefc; border-radius:10px; padding:10px 12px; font-weight:600; }
+    button:active { transform: translateY(1px); }
+    .muted { color: rgba(232,238,252,.75); font-size: 12px; line-height: 1.3; }
+    .status { margin: 8px 0 10px; font-size: 14px; }
+    .boards { display:flex; gap:14px; flex-wrap:wrap; }
+    .board-wrap { display:flex; flex-direction:column; gap:6px; }
+    .label { font-size: 13px; color: rgba(232,238,252,.85); }
+    .grid { display:grid; grid-template-columns: repeat(10, var(--cell)); gap: var(--gap); padding:8px; background:rgba(255,255,255,.03); border-radius:12px; border:1px solid rgba(255,255,255,.08); }
+    .cell { width: var(--cell); height: var(--cell); border-radius:6px; display:flex; align-items:center; justify-content:center; user-select:none; -webkit-tap-highlight-color: transparent; }
+    .empty { background: rgba(255,255,255,.02); }
+    .ship  { background: rgba(255,255,255,.16); }
+    .miss  { background: rgba(255,255,255,.06); }
+    .hit   { background: rgba(255,70,70,.22); }
+    .mark { font-size: 14px; font-weight:900; opacity:.9; }
+    .dot { width:6px; height:6px; border-radius:50%; background: rgba(255,255,255,.55); }
+    .hl { outline: 2px solid rgba(255,215,0,.55); }
+    .stats { display:flex; gap:14px; flex-wrap:wrap; font-size: 12px; color: rgba(232,238,252,.75); }
+    .badge { padding:6px 8px; border-radius:10px; background: rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.08); }
+    .footer { margin-top:10px; }
+  </style>
+</head>
+
+<body>
+  <h1>Морський бій</h1>
+
+  <div class="panel">
+    <div class="top">
+      <div class="muted">10×10, флот 4-3-3-2-2-2-1-1-1-1, кораблі не торкаються. Потоплений обводиться промахами.</div>
+      <button id="newBtn">Нова гра</button>
+    </div>
+
+    <div class="status" id="status">…</div>
+
+    <div class="stats">
+      <div class="badge" id="pStats">Ви: …</div>
+      <div class="badge" id="bStats">Бот: …</div>
+    </div>
+
+    <div class="boards">
+      <div class="board-wrap">
+        <div class="label">Ваше поле</div>
+        <div class="grid" id="playerGrid"></div>
+      </div>
+
+      <div class="board-wrap">
+        <div class="label">Поле бота (стріляйте тут)</div>
+        <div class="grid" id="botGrid"></div>
+      </div>
+    </div>
+
+    <div class="footer muted">
+      Після публікації на GitHub Pages: Safari → Поділитися → На екран «Додому».
+    </div>
+  </div>
+
+<script>
+(() => {
+  const N = 10;
+  const FLEET = [4,3,3,2,2,2,1,1,1,1];
+  const Cell = { empty:0, ship:1, hit:2, miss:3 };
+
+  const state = {
+    player: null, bot: null,
+    turn: "player",
+    gameOver: false,
+    lastP: null, lastB: null,
+    pShots: 0, pHits: 0, pAlive: 10,
+    bShots: 0, bHits: 0, bAlive: 10,
+    botTried: new Set(),
+    botHits: [],
+    botDir: null
+  };
+
+  const el = {
+    status: document.getElementById("status"),
+    pStats: document.getElementById("pStats"),
+    bStats: document.getElementById("bStats"),
+    newBtn: document.getElementById("newBtn"),
+    playerGrid: document.getElementById("playerGrid"),
+    botGrid: document.getElementById("botGrid"),
+  };
+
+  function mkBoard() {
+    return { grid: Array.from({length:N}, () => Array.from({length:N}, () => Cell.empty)), ships: [] };
+  }
+  function inBounds(r,c){ return r>=0 && r<N && c>=0 && c<N; }
+  function neighbors8(r,c){
+    const out=[];
+    for(let rr=r-1; rr<=r+1; rr++) for(let cc=c-1; cc<=c+1; cc++) if(inBounds(rr,cc)) out.push({r:rr,c:cc});
+    return out;
+  }
+  function canPlace(board, len, r, c, horiz){
+    const pts=[];
+    for(let i=0;i<len;i++){
+      const rr = r + (horiz?0:i), cc = c + (horiz?i:0);
+      if(!inBounds(rr,cc)) return null;
+      pts.push({r:rr,c:cc});
+    }
+    for(const p of pts){
+      for(const q of neighbors8(p.r,p.c)){
+        if(board.grid[q.r][q.c] === Cell.ship) return null;
+      }
+    }
+    return pts;
+  }
+  function placeShip(board, pts){
+    for(const p of pts) board.grid[p.r][p.c] = Cell.ship;
+    board.ships.push(pts);
+  }
+  function autoPlace(board){
+    board.grid.forEach(row => row.fill(Cell.empty));
+    board.ships = [];
+    for(const len of FLEET){
+      let ok=false;
+      for(let t=0; t<20000 && !ok; t++){
+        const horiz = Math.random()<0.5;
+        const r = (Math.random()*N)|0, c = (Math.random()*N)|0;
+        const pts = canPlace(board,len,r,c,horiz);
+        if(pts){ placeShip(board, pts); ok=true; }
+      }
+    }
+  }
+  function shipIndexAt(board, r,c){
+    return board.ships.findIndex(ship => ship.some(p => p.r===r && p.c===c));
+  }
+  function markHalo(board, ship){
+    for(const p of ship){
+      for(const q of neighbors8(p.r,p.c)){
+        if(board.grid[q.r][q.c] === Cell.empty) board.grid[q.r][q.c] = Cell.miss;
+      }
+    }
+  }
+  function shoot(board, r,c){
+    const cur = board.grid[r][c];
+    if(cur === Cell.hit || cur === Cell.miss) return {type:"already"};
+    if(cur === Cell.empty){ board.grid[r][c] = Cell.miss; return {type:"miss"}; }
+    if(cur === Cell.ship){
+      board.grid[r][c] = Cell.hit;
+      const idx = shipIndexAt(board,r,c);
+      if(idx >= 0){
+        const ship = board.ships[idx];
+        const sunk = ship.every(p => board.grid[p.r][p.c] === Cell.hit);
+        if(sunk){ markHalo(board, ship); return {type:"sunk", ship}; }
+      }
+      return {type:"hit"};
+    }
+  }
+  function allSunk(board){
+    return board.ships.every(ship => ship.every(p => board.grid[p.r][p.c] === Cell.hit));
+  }
+
+  function cssClass(board, r,c, revealShips){
+    const s = board.grid[r][c];
+    if(s === Cell.empty) return "empty";
+    if(s === Cell.ship) return revealShips ? "ship" : "empty";
+    if(s === Cell.miss) return "miss";
+    if(s === Cell.hit) return "hit";
+  }
+  function addMark(cell, board, r,c){
+    const s = board.grid[r][c];
+    if(s === Cell.miss){
+      const d = document.createElement("div"); d.className = "dot"; cell.appendChild(d);
+    } else if(s === Cell.hit){
+      const m = document.createElement("div"); m.className = "mark"; m.textContent = "×"; cell.appendChild(m);
+    }
+  }
+
+  function setStatus(text){ el.status.textContent = text; }
+
+  function render(){
+    el.playerGrid.innerHTML = "";
+    el.botGrid.innerHTML = "";
+    el.pStats.textContent = `Ви: кораблів ${state.pAlive}/10 · постріли ${state.pShots} · влучання ${state.pHits}`;
+    el.bStats.textContent = `Бот: кораблів ${state.bAlive}/10 · постріли ${state.bShots} · влучання ${state.bHits}`;
+
+    for(let r=0;r<N;r++) for(let c=0;c<N;c++){
+      const cell = document.createElement("div");
+      cell.className = "cell " + cssClass(state.player, r,c, true);
+      if(state.lastB && state.lastB.r===r && state.lastB.c===c) cell.classList.add("hl");
+      addMark(cell, state.player, r,c);
+      el.playerGrid.appendChild(cell);
+    }
+
+    for(let r=0;r<N;r++) for(let c=0;c<N;c++){
+      const cell = document.createElement("div");
+      cell.className = "cell " + cssClass(state.bot, r,c, false);
+      if(state.lastP && state.lastP.r===r && state.lastP.c===c) cell.classList.add("hl");
+      addMark(cell, state.bot, r,c);
+      cell.addEventListener("click", () => onPlayerShot(r,c), {passive:true});
+      el.botGrid.appendChild(cell);
+    }
+  }
+
+  function key(p){ return `${p.r},${p.c}`; }
+  function inb(p){ return inBounds(p.r,p.c); }
+  function orth(p){
+    return [{r:p.r-1,c:p.c},{r:p.r+1,c:p.c},{r:p.r,c:p.c-1},{r:p.r,c:p.c+1}].filter(inb);
+  }
+  function shuffle(a){
+    a=a.slice();
+    for(let i=a.length-1;i>0;i--){
+      const j=(Math.random()*(i+1))|0; [a[i],a[j]]=[a[j],a[i]];
+    }
+    return a;
+  }
+  function uniq(arr){
+    const s=new Set(), out=[];
+    for(const p of arr){ const k=key(p); if(!s.has(k)){ s.add(k); out.push(p); } }
+    return out;
+  }
+
+  function botChaseTargets(){
+    if(!state.botDir){
+      const out=[]; for(const h of state.botHits) out.push(...orth(h));
+      return uniq(out);
+    }
+    if(state.botDir==="h"){
+      const row = state.botHits[0].r;
+      const cols = state.botHits.map(p=>p.c);
+      const minC=Math.min(...cols), maxC=Math.max(...cols);
+      return [{r:row,c:minC-1},{r:row,c:maxC+1}];
+    } else {
+      const col = state.botHits[0].c;
+      const rows = state.botHits.map(p=>p.r);
+      const minR=Math.min(...rows), maxR=Math.max(...rows);
+      return [{r:minR-1,c:col},{r:maxR+1,c:col}];
+    }
+  }
+  function canShootPlayer(p){
+    const cur = state.player.grid[p.r][p.c];
+    return cur !== Cell.hit && cur !== Cell.miss;
+  }
+  function botChooseShot(){
+    if(state.botHits.length>0){
+      const targets = botChaseTargets();
+      for(const t of targets){
+        if(inb(t) && !state.botTried.has(key(t)) && canShootPlayer(t)) return t;
+      }
+      const neigh = shuffle(orth(state.botHits[state.botHits.length-1]));
+      for(const t of neigh){
+        if(!state.botTried.has(key(t)) && canShootPlayer(t)) return t;
+      }
+    }
+    while(true){
+      const p={r:(Math.random()*N)|0, c:(Math.random()*N)|0};
+      if(!state.botTried.has(key(p)) && canShootPlayer(p)) return p;
+    }
+  }
+  function botRegister(shot, res){
+    if(res.type==="hit"){
+      state.botHits.push(shot);
+      if(state.botHits.length>=2 && !state.botDir){
+        const a=state.botHits[0], b=state.botHits[1];
+        if(a.r===b.r) state.botDir="h";
+        if(a.c===b.c) state.botDir="v";
+      }
+    } else if(res.type==="sunk"){
+      state.botHits=[]; state.botDir=null;
+    }
+  }
+
+  function onPlayerShot(r,c){
+    if(state.gameOver || state.turn!=="player") return;
+    const res = shoot(state.bot, r,c);
+    if(res.type==="already") return;
+
+    state.pShots++; state.lastP={r,c};
+
+    if(res.type==="miss"){
+      setStatus("Промах. Хід бота.");
+      state.turn="bot";
+      render();
+      setTimeout(botTurn, 450);
+      return;
+    }
+
+    state.pHits++;
+    if(res.type==="sunk"){ state.bAlive--; setStatus("Потопили корабель! Стріляйте ще."); }
+    else setStatus("Влучання! Стріляйте ще.");
+
+    if(allSunk(state.bot)){
+      state.gameOver=true;
+      setStatus("Гру завершено. Переміг: Ви.");
+    }
+    render();
+  }
+
+  function botTurn(){
+    if(state.gameOver || state.turn!=="bot") return;
+    const shot = botChooseShot();
+    state.botTried.add(key(shot));
+    const res = shoot(state.player, shot.r, shot.c);
+
+    state.bShots++; state.lastB=shot;
+
+    if(res.type==="miss"){
+      setStatus("Бот промахнувся. Ваш хід.");
+      state.turn="player";
+      render();
+      return;
+    }
+
+    state.bHits++;
+    botRegister(shot, res);
+
+    if(res.type==="sunk"){ state.pAlive--; setStatus("Бот потопив ваш корабель. Бот стріляє ще."); }
+    else setStatus("Бот влучив. Бот стріляє ще.");
+
+    if(allSunk(state.player)){
+      state.gameOver=true;
+      setStatus("Гру завершено. Переміг: Бот.");
+      render();
+      return;
+    }
+
+    render();
+    setTimeout(botTurn, 420);
+  }
+
+  function newGame(){
+    state.player = mkBoard();
+    state.bot = mkBoard();
+    autoPlace(state.player);
+    autoPlace(state.bot);
+
+    state.turn="player";
+    state.gameOver=false;
+    state.lastP=null; state.lastB=null;
+
+    state.pShots=0; state.pHits=0; state.pAlive=10;
+    state.bShots=0; state.bHits=0; state.bAlive=10;
+
+    state.botTried=new Set();
+    state.botHits=[]; state.botDir=null;
+
+    setStatus("Ваш хід: стріляйте по полю бота.");
+    render();
+
+    // Service Worker (кеш офлайн)
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js").catch(()=>{});
+    }
+  }
+
+  el.newBtn.addEventListener("click", newGame);
+  newGame();
+})();
+</script>
+</body>
+</html>
